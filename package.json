@@ -1,23 +1,23 @@
 {
   "name": "com.unity.ucg.qos",
   "displayName": "Multiplay QoS Client",
-  "version": "0.1.1-preview.4",
+  "version": "0.2.0-preview",
   "unity": "2019.3",
   "description": "Unity runtime library for clients to query QoS service for Multiplay-hosted dedicated game servers.",
   "dependencies": {
-    "com.unity.collections": "0.9.0-preview.5",
+    "com.unity.collections": "0.9.0-preview.6",
     "com.unity.transport": "0.3.1-preview.4"
   },
   "relatedPackages": {
-    "com.unity.ucg.qos.tests": "0.1.1-preview.4"
+    "com.unity.ucg.qos.tests": "0.2.0-preview"
   },
   "upmCi": {
-    "footprint": "03cda2ff06e4e414de2a0794e05d91f075f5ed72"
+    "footprint": "95320064792b086fa95947e248e9d9812d668870"
   },
   "repository": {
     "url": "https://github.cds.internal.unity3d.com/unity/com.unity.ucg.qos.git",
     "type": "git",
-    "revision": "f4eda2fa66d811c69cd8f2b0b0f6351afa142998"
+    "revision": "be415689bbf16fdc0c55e303c5e82b6cb772a1c2"
   },
   "samples": [
     {

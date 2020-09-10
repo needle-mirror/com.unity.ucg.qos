@@ -146,6 +146,8 @@ namespace Unity.Networking.QoS
         /// <summary>
         ///     Starts the QoS server discovery process
         /// </summary>
+        /// <param name="successHandler">If specified, overrides the OnSuccess property</param>
+        /// <param name="errorHandler">If specified, overrides the OnError property</param>
         /// <remarks>
         ///     * QosDiscovery is not thread safe and does not support concurrent
         ///     Discovery requests. Calling Start while another discovery

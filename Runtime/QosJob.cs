@@ -23,7 +23,7 @@ namespace Unity.Networking.QoS
 
         [DeallocateOnJobCompletion] private NativeArray<InternalQosServer> m_QosServers;
         [DeallocateOnJobCompletion] private NativeArray<byte> m_TitleBytesUtf8;
-        private NativeHashMap<network_address,int> m_AddressIndexes;
+        private NativeHashMap<network_address, int> m_AddressIndexes;
         private long m_Socket;
         private DateTime m_JobExpireTimeUtc;
         private int m_Requests;
@@ -40,12 +40,11 @@ namespace Unity.Networking.QoS
             RequestPauseMs = requestPauseMs;
             ReceiveWaitMs = receiveWaitMs;
 
-
             var networkInterface = new UDPNetworkInterface();
             NetworkEndPoint remote;
 
             // Copy the QoS Servers into the job, converting all the IP/Port to NetworkEndPoint and DateTime to ticks.
-            m_AddressIndexes = new NativeHashMap<network_address,int>(qosServers?.Count ?? 0, Allocator.Persistent);
+            m_AddressIndexes = new NativeHashMap<network_address, int>(qosServers?.Count ?? 0, Allocator.Persistent);
             m_QosServers = new NativeArray<InternalQosServer>(qosServers?.Count ?? 0, Allocator.Persistent);
             if (qosServers != null)
             {
@@ -176,17 +175,8 @@ namespace Unity.Networking.QoS
             QosResult r;
             foreach (var s in m_QosServers)
             {
-                if (s.Duplicate)
-                {
-                    // Duplicate server so just copy the result.
-                    r = QosResults[s.FirstIdx];
-                }
-                else
-                {
-                    r = QosResults[s.Idx];
-                    r.Update();
-                }
-
+                // If duplicate server, just copy the result.
+                r = s.Duplicate ? QosResults[s.FirstIdx] : QosResults[s.Idx];
                 StoreResult(s.Idx, r);
             }
         }
@@ -275,7 +265,7 @@ namespace Unity.Networking.QoS
                 {
                     m_Requests++;
                     result.RequestsSent++;
-                    if (RequestsBetweenPause > 0 && RequestPauseMs > 0 && m_Requests%RequestsBetweenPause == 0)
+                    if (RequestsBetweenPause > 0 && RequestPauseMs > 0 && m_Requests % RequestsBetweenPause == 0)
                     {
                         // Inject a delay to help avoid network overload and to space requests out over time
                         // which can improve the accuracy of the results.
@@ -362,7 +352,7 @@ namespace Unity.Networking.QoS
                 {
                     // Even though this could indicate a config issue the most common cause
                     // will be packet loss so use debug not warning.
-                    Debug.Log($"QosJob: not enough time to receive {m_Requests-m_Responses} responses still outstanding");
+                    Debug.Log($"QosJob: not enough time to receive {m_Requests - m_Responses} responses still outstanding");
                     return 0;
                 }
 
@@ -406,7 +396,7 @@ namespace Unity.Networking.QoS
                 {
                     m_Responses++;
                     result.ResponsesReceived++;
-                    result.AverageLatencyMs += (uint)response.LatencyMs;
+                    result.AddAggregateLatency((uint)response.LatencyMs);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
                     Debug.Log($"QosJob: response from {QosHelper.Address(addr)} with latency {response.LatencyMs}ms");
 #endif
@@ -508,7 +498,7 @@ namespace Unity.Networking.QoS
                 int ec = 0;
                 if (NativeBindings.network_close(ref socket, ref ec) != 0)
                 {
-                     Debug.LogError($"QosJob: failed to close socket (errorcode {ec})");
+                    Debug.LogError($"QosJob: failed to close socket (errorcode {ec})");
                 }
                 return (rc, errorcode);
             }

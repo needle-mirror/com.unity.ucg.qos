@@ -46,7 +46,7 @@ public class QosCheck : MonoBehaviour
     public float weightOfCurrentResult = 0.75f;
 
     [Tooltip("How many QoS results to save per server. The historic results are used in the computation of the overall weighted rolling average.  Must be non-zero.")]
-    public uint qosResultHistory = 5;
+    public int qosResultHistory = 5;
 
     [Header("QoS Discovery Settings")]
     [Tooltip("If true, queries Multiplay for a list of QoS servers for the locations a Fleet is deployed to.")]
@@ -146,7 +146,7 @@ public class QosCheck : MonoBehaviour
         if (qosResultHistory == 0)
             throw new ArgumentOutOfRangeException(nameof(qosResultHistory), "Must keep at least 1 QoS result");
 
-        if (weightOfCurrentResult < 0.0f || weightOfCurrentResult > 1.0f)
+        if (!QosStats.InRangeInclusive(weightOfCurrentResult, 0.0f, 1.0f))
             throw new ArgumentOutOfRangeException(nameof(weightOfCurrentResult), "Weight must be in the range [0.0..1.0]");
 
         // Try to use the discovery service to find qos servers
@@ -171,7 +171,8 @@ public class QosCheck : MonoBehaviour
         if (!useQosDiscoveryService)
             return;
 
-        m_Discovery = m_Discovery ?? new QosDiscovery(fleetId?.Trim()){
+        m_Discovery = m_Discovery ?? new QosDiscovery(fleetId?.Trim())
+        {
             RequestTimeoutSeconds = requestTimeoutSec,
             RequestRetries = requestRetries,
             OnSuccess = DiscoverySuccess,
@@ -250,25 +251,29 @@ public class QosCheck : MonoBehaviour
         {
             var ipAndPort = qosServers[i].ToString();
             var r = results[i];
-            m_Stats.AddResult(ipAndPort, r);
+            m_Stats.ProcessResult(ipAndPort, r);
 
-            if (r.RequestsSent == 0)
-                Debug.Log($"{ipAndPort}: Sent/Received: 0");
-            else
-                Debug.Log($"{ipAndPort}: " +
-                    $"Received/Sent: {r.ResponsesReceived}/{r.RequestsSent}, " +
-                    $"Latency: {r.AverageLatencyMs}ms, " +
-                    $"Packet Loss: {r.PacketLoss * 100.0f:F1}%, " +
-                    $"Flow Control Type: {r.FcType}, " +
-                    $"Flow Control Units: {r.FcUnits}, " +
-                    $"Duplicate responses: {r.DuplicateResponses}, " +
-                    $"Invalid responses: {r.InvalidResponses}");
-
-            // Deal with flow control in results (must have gotten at least one response back)
-            if (r.ResponsesReceived > 0 && r.FcType != FcType.None)
+            if (r.AverageLatencyMs == QosResult.InvalidLatencyValue || r.PacketLoss == QosResult.InvalidPacketLossValue)
             {
-                qosServers[i].BackoffUntilUtc = GetBackoffUntilTime(r.FcUnits);
-                Debug.Log($"{ipAndPort}: Server applied flow control and will no longer respond until {qosServers[i].BackoffUntilUtc}.");
+                Debug.Log($"Invalid results for ${ipAndPort}");
+            }
+            else
+            {
+                Debug.Log($"{ipAndPort}: " +
+                          $"Received/Sent: {r.ResponsesReceived}/{r.RequestsSent}, " +
+                          $"Latency: {r.AverageLatencyMs}ms, " +
+                          $"Packet Loss: {r.PacketLoss * 100.0f:F1}%, " +
+                          $"Flow Control Type: {r.FcType}, " +
+                          $"Flow Control Units: {r.FcUnits}, " +
+                          $"Duplicate responses: {r.DuplicateResponses}, " +
+                          $"Invalid responses: {r.InvalidResponses}");
+
+                // Deal with flow control in results (must have gotten at least one response back)
+                if (r.FcType != FcType.None)
+                {
+                    qosServers[i].BackoffUntilUtc = GetBackoffUntilTime(r.FcUnits);
+                    Debug.Log($"{ipAndPort}: Server applied flow control and will no longer respond until {qosServers[i].BackoffUntilUtc}.");
+                }
             }
         }
     }
@@ -283,16 +288,16 @@ public class QosCheck : MonoBehaviour
             if (m_Stats.TryGetWeightedAverage(ipAndPort, out var result))
             {
                 m_Stats.TryGetAllResults(ipAndPort, out var allResults);
-
-                // NOTE:  You probably don't want Linq in your game, but it's convenient here to filter out the invalid results.
-                Debug.Log($"Weighted average QoS report for {ipAndPort}: " +
-                    $"Latency: {result.LatencyMs}ms, " +
-                    $"Packet Loss: {result.PacketLoss * 100.0f:F1}%, " +
-                    $"All Results: {string.Join(", ", allResults.Select(x => x.IsValid() ? x.LatencyMs : 0))}");
+                // NOTE:  You probably don't want Linq in your game, but it's convenient here to extract the desired results.
+                Debug.Log($"QoS report for {ipAndPort}:\n" +
+                          $"Weighted Latency: {result.LatencyMs}ms,\n" +
+                          $"Weighted Packet Loss: {result.PacketLoss * 100.0f:F1}%,\n" +
+                          $"All Results Packet Loss: {string.Join(", ", allResults.Select(x => x.PacketLoss))}\n" +
+                          $"All Results Latency: {string.Join(", ", allResults.Select(x => x.LatencyMs))}");
             }
             else
             {
-                Debug.Log($"No results for {ipAndPort}.");
+                Debug.Log($"No weighted results for {ipAndPort}.");
             }
         }
     }
