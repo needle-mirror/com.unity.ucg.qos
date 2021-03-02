@@ -1,4 +1,11 @@
 # Changelog
+## [0.3.0-preview.1] - 2021-03-02
+### Fixed
+- Obsolete usage of UnityWebRequest Errors
+
+### Changed
+- Minimum supported Unity version has been bumped to 2020.2
+
 ## [0.2.0-preview] - 2020-09-10
 ### Added
 - QosResult.AddAggregateLatency() replaces QosResult.AverageLatencyMs to generate the aggregate sum of all latencies that is used to compute the average. Instead of directly adding to QosResult.AverageLatencyMs, call QosResult.AddAggregateLatency.

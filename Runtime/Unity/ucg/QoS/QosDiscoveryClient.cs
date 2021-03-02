@@ -193,7 +193,9 @@ namespace Unity.Networking.QoS
         /// <returns>True if UnityWebRequest is failed, false if not</returns>
         public static bool IsWebRequestNullOrFailed(UnityWebRequest webRequest)
         {
-            return webRequest == null || webRequest.isNetworkError || webRequest.isHttpError;
+            return webRequest == null || 
+                   webRequest.result == UnityWebRequest.Result.ConnectionError ||
+                   webRequest.result == UnityWebRequest.Result.ProtocolError;
         }
 
         /// <summary>
@@ -205,7 +207,7 @@ namespace Unity.Networking.QoS
         {
             if (webRequest == null)
                 return false;
-            if (webRequest.isNetworkError)
+            if (webRequest.result == UnityWebRequest.Result.ConnectionError)
                 return true;
             if (webRequest.responseCode >= 400 && webRequest.responseCode < 500)
                 return false;
