@@ -1,5 +1,7 @@
 using System;
-using Unity.Networking.Transport;
+using Unity.Baselib.LowLevel;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 
 namespace Unity.Networking.QoS
 {
@@ -73,7 +75,7 @@ namespace Unity.Networking.QoS
         /// <summary>
         /// Send the QosRequest packet to the given endpoint
         /// </summary>
-        /// <param name="socket">Native socket descriptor</param>
+        /// <param name="socketHandle">Native socket descriptor</param>
         /// <param name="endPoint">Remote endpoint to send the request</param>
         /// <param name="expireTimeUtc">When to stop trying to send</param>
         /// <returns>
@@ -81,63 +83,51 @@ namespace Unity.Networking.QoS
         /// 0 means no error.
         /// </returns>
         /// <exception cref="InvalidOperationException">Thrown if no title is set on the request.</exception>
-        public unsafe (int, int) Send(long socket, ref NetworkInterfaceEndPoint endPoint, DateTime expireTimeUtc)
+        internal unsafe (uint, int) Send(IntPtr socketHandle, NetworkEndPoint endPoint, DateTime expireTimeUtc)
         {
-            int errorcode = 0;
             if (Title == null)
             {
                 // A title will guarantee the packet length is sufficient
                 throw new InvalidOperationException("QosRequest requires a title.");
             }
 
-            fixed (
-                void* pMagic = &m_Magic,
-                pVerAndFlow = &m_VerAndFlow,
-                pTitleLen = &m_TitleLen,
-                pTitle = &m_Title[0],
-                pSequence = &m_Sequence,
-                pIdentifier = &m_Identifier,
-                pTimestamp = &m_Timestamp,
-                pRemoteAddr = endPoint.data
-            )
+            // No byte swizzling here since the required fields are one byte (or arrays of bytes), and the
+            // custom data is reflected back to us in the same format it was sent.
+            
+            // The maximum packet size is 1500, we want to make sure we reserve enough space for the buffer.
+            // Calculate the next nearest power of two for the buffer capacity
+            var bufferCapacity = (int) Math.Pow(2, (int) Math.Log(m_PacketLength-1, 2) + 1);
+            var buffer = new UnsafeAppendBuffer(bufferCapacity, 16, Allocator.TempJob);
+            buffer.Add(m_Magic);
+            buffer.Add(m_VerAndFlow);
+            buffer.Add(m_TitleLen);
+            for (var i = 0; i < m_TitleLen - 1; i++)
             {
-                // No byte swizzling here since the required fields are one byte (or arrays of bytes), and the
-                // custom data is reflected back to us in the same format it was sent.
-                const int iovLen = 7;
-                var iov = stackalloc network_iovec[iovLen];
-
-                iov[0].buf = pMagic;
-                iov[0].len = sizeof(byte);
-
-                iov[1].buf = pVerAndFlow;
-                iov[1].len = sizeof(byte);
-
-                iov[2].buf = pTitleLen;
-                iov[2].len = sizeof(byte);
-
-                iov[3].buf = pTitle;
-                iov[3].len = m_Title.Length;
-
-                iov[4].buf = pSequence;
-                iov[4].len = sizeof(byte);
-
-                iov[5].buf = pIdentifier;
-                iov[5].len = sizeof(ushort);
-
-                // Everything below here is user-specified data and not part of the QosRequest header
-
-                iov[6].buf = pTimestamp;
-                iov[6].len = sizeof(ulong);
-
-                // WouldBlock is rare on send, but we'll handle it anyway.
-                int sent = -1;
-                do
-                {
-                    sent = NativeBindings.network_sendmsg(socket, iov, iovLen, ref *(network_address*)pRemoteAddr, ref errorcode);
-                } while (sent == -1 && QosHelper.WouldBlock(errorcode) && !QosHelper.ExpiredUtc(expireTimeUtc));
-
-                return (sent, errorcode);
+                buffer.Add(m_Title[i]);
             }
+            buffer.Add(m_Sequence);
+            buffer.Add(m_Identifier);
+            buffer.Add(m_Timestamp);
+
+            var dataLen = (uint)buffer.Length;
+
+            var message = default(Binding.Baselib_Socket_Message);
+            message.address = &endPoint.rawNetworkAddress;
+            message.data = new IntPtr(buffer.Ptr);
+            message.dataLen = dataLen;
+            
+            var errorState = default(Binding.Baselib_ErrorState);
+            var socket = new Binding.Baselib_Socket_Handle {handle = socketHandle};
+            uint sent = 0;
+            
+            do
+            {
+                sent = Binding.Baselib_Socket_UDP_Send(socket, &message, 1, &errorState);
+            } while (sent == 0 && QosHelper.WouldBlock(errorState.nativeErrorCode) && !QosHelper.ExpiredUtc(expireTimeUtc));
+            
+            // Free memory
+            buffer.Dispose();
+            return ((uint)Length, (int)errorState.code);
         }
     }
 }

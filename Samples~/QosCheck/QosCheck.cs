@@ -4,7 +4,6 @@ using System.Linq;
 using System.Text;
 using Unity.Jobs;
 using Unity.Networking.QoS;
-using Unity.Networking.Transport;
 using UnityEngine;
 
 public class QosCheck : MonoBehaviour
@@ -61,11 +60,6 @@ public class QosCheck : MonoBehaviour
     [Tooltip("Number of retires the Discovery service will make. Default is 2 seconds.")]
     public int requestRetries = 2;
 
-    void Awake()
-    {
-        NativeBindings.network_initialize();
-    }
-
     void Update()
     {
         if (m_QosCoroutine == null)
@@ -107,8 +101,6 @@ public class QosCheck : MonoBehaviour
         }
 
         m_Discovery?.Reset();
-
-        NativeBindings.network_terminate();
     }
 
     // A coroutine that perioidically triggers qos checks
@@ -171,7 +163,7 @@ public class QosCheck : MonoBehaviour
         if (!useQosDiscoveryService)
             return;
 
-        m_Discovery = m_Discovery ?? new QosDiscovery(fleetId?.Trim())
+        m_Discovery ??= new QosDiscovery(fleetId?.Trim())
         {
             RequestTimeoutSeconds = requestTimeoutSec,
             RequestRetries = requestRetries,
@@ -255,7 +247,7 @@ public class QosCheck : MonoBehaviour
 
             if (r.AverageLatencyMs == QosResult.InvalidLatencyValue || r.PacketLoss == QosResult.InvalidPacketLossValue)
             {
-                Debug.Log($"Invalid results for ${ipAndPort}");
+                Debug.Log($"Invalid results for ${ipAndPort}, {r.AverageLatencyMs}, {r.PacketLoss}");
             }
             else
             {

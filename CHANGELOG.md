@@ -1,4 +1,10 @@
 # Changelog
+## [0.3.1-preview.1] - 2021-03-12
+### Changed
+- The QoS package no longer has a dependency on the Transport Package.
+- Calls to NativeBindings no longer supported.
+- Removed requirement to initialize network before performing a QoS check.
+
 ## [0.3.0-preview.1] - 2021-03-02
 ### Fixed
 - Obsolete usage of UnityWebRequest Errors

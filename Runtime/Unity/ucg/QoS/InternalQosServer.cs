@@ -1,5 +1,4 @@
 using System;
-using Unity.Networking.Transport;
 
 namespace Unity.Networking.QoS
 {
@@ -11,17 +10,16 @@ namespace Unity.Networking.QoS
         /// </summary>
         private struct InternalQosServer
         {
-            public readonly NetworkInterfaceEndPoint RemoteEndpoint;
+            public readonly NetworkEndPoint RemoteEndpoint;
             public readonly DateTime BackoffUntilUtc;
             public readonly int Idx;
-
             private int m_FirstIdx;
             private ushort m_RequestIdentifier;
 
             /// <summary>
             /// InternalQosServer is the internal representation of a QoS server use by QosJob.
             /// </summary>
-            public InternalQosServer(NetworkInterfaceEndPoint remote, DateTime backoffUntilUtc, int idx)
+            public InternalQosServer(NetworkEndPoint remote, DateTime backoffUntilUtc, int idx)
             {
                 RemoteEndpoint = remote;
                 BackoffUntilUtc = backoffUntilUtc;
@@ -30,11 +28,6 @@ namespace Unity.Networking.QoS
                 m_FirstIdx = idx;
                 m_RequestIdentifier = 0;
             }
-
-            /// <summary>
-            /// NetworkAddress returns the network address of this server.
-            /// </summary>
-            public network_address NetworkAddress => QosHelper.NetworkAddress(RemoteEndpoint);
 
             /// <summary>
             /// FirstIdx is the index of the first server which matches the address of this server.
@@ -62,7 +55,7 @@ namespace Unity.Networking.QoS
             /// <summary>
             /// Address returns the address string of the server.
             /// </summary>
-            public string Address => QosHelper.Address(RemoteEndpoint);
+            public string Address => RemoteEndpoint.Address;
         }
     }
 }

@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using Unity.Collections;
 using Unity.Jobs;
-using Unity.Networking.Transport;
+using Unity.Baselib.LowLevel;
 using UnityEngine;
 using Random = System.Random;
 
@@ -23,8 +23,7 @@ namespace Unity.Networking.QoS
 
         [DeallocateOnJobCompletion] private NativeArray<InternalQosServer> m_QosServers;
         [DeallocateOnJobCompletion] private NativeArray<byte> m_TitleBytesUtf8;
-        private NativeHashMap<network_address, int> m_AddressIndexes;
-        private long m_Socket;
+        private NativeHashMap<NativeString64, int> m_AddressIndexes;
         private DateTime m_JobExpireTimeUtc;
         private int m_Requests;
         private int m_Responses;
@@ -39,29 +38,32 @@ namespace Unity.Networking.QoS
             RequestsBetweenPause = requestsBetweenPause;
             RequestPauseMs = requestPauseMs;
             ReceiveWaitMs = receiveWaitMs;
-
-            var networkInterface = new UDPNetworkInterface();
-            NetworkEndPoint remote;
-
+            
             // Copy the QoS Servers into the job, converting all the IP/Port to NetworkEndPoint and DateTime to ticks.
-            m_AddressIndexes = new NativeHashMap<network_address, int>(qosServers?.Count ?? 0, Allocator.Persistent);
+            m_AddressIndexes = new NativeHashMap<NativeString64, int>(qosServers?.Count ?? 0, Allocator.Persistent);
             m_QosServers = new NativeArray<InternalQosServer>(qosServers?.Count ?? 0, Allocator.Persistent);
             if (qosServers != null)
             {
-                int i = 0;
+                var i = 0;
                 foreach (var s in qosServers)
                 {
-                    if (!NetworkEndPoint.TryParse(s.ipv4, s.port, out remote))
+                    if (!NetworkEndPoint.TryParse(s.ipv4, s.port, out var remote))
                     {
                         Debug.LogError($"QosJob: Invalid IP address {s.ipv4} in QoS Servers list");
                         continue;
                     }
 
-                    var server = new InternalQosServer(networkInterface.CreateInterfaceEndPoint(remote), s.BackoffUntilUtc, i);
-                    if (!m_AddressIndexes.TryAdd(server.NetworkAddress, i))
+                    var server = new InternalQosServer(remote, s.BackoffUntilUtc, i);
+                    
+                    // check if the server already exists
+                    if (m_AddressIndexes.ContainsKey(server.Address))
                     {
                         // Duplicate server.
-                        server.FirstIdx = m_AddressIndexes[server.NetworkAddress];
+                        server.FirstIdx = m_AddressIndexes[server.Address];
+                    }
+                    else
+                    {
+                        m_AddressIndexes.Add(server.Address, i);
                     }
 
                     StoreServer(server);
@@ -116,21 +118,20 @@ namespace Unity.Networking.QoS
 #endif
 
             // Create the local socket
-            int errorcode = 0;
-            (m_Socket, errorcode) = CreateAndBindSocket();
-            if (m_Socket == -1 || errorcode != 0)
+            Binding.Baselib_ErrorCode errorCode;
+            Binding.Baselib_Socket_Handle socket;
+            (socket, errorCode) = CreateAndBindSocket();
+
+            if (errorCode != Binding.Baselib_ErrorCode.Success)
             {
                 // Can't run the job
-                Debug.LogError($"QosJob: failed to create and bind the local socket (errorcode {errorcode})");
+                Debug.LogError($"QosJob: failed to create and bind the local socket (errorcode {errorCode})");
                 return;
             }
 
-            ProcessServers();
+            ProcessServers(socket);
 
-            if (NativeBindings.network_close(ref m_Socket, ref errorcode) != 0)
-            {
-                Debug.LogError($"QosJob: failed to close socket (errorcode {errorcode})");
-            }
+            Binding.Baselib_Socket_Close(socket);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             Debug.Log($"QosJob: took {QosHelper.Since(startTime)} to process {m_QosServers.Length} servers");
 #endif
@@ -139,10 +140,10 @@ namespace Unity.Networking.QoS
         /// <summary>
         /// Sends QoS requests to all servers and receives the responses.
         /// </summary>
-        private void ProcessServers()
+        private void ProcessServers(Binding.Baselib_Socket_Handle socketHandle)
         {
-            var startTime = DateTime.UtcNow;
-            NetworkInterfaceEndPoint addr = QosHelper.CreateInterfaceEndPoint(NetworkEndPoint.AnyIpv4); // TODO(steve): IPv6 support
+            // Create placeholder endpoint
+            var endpoint = default(NetworkEndPoint);
             foreach (var s in m_QosServers)
             {
                 if (s.Duplicate)
@@ -151,10 +152,10 @@ namespace Unity.Networking.QoS
                     continue;
                 }
 
-                ProcessServer(s);
+                ProcessServer(s, socketHandle);
 
                 // To get as accurate results as possible check to see if we have pending responses.
-                RecvQosResponsesTimed(addr, m_JobExpireTimeUtc, false);
+                RecvQosResponsesTimed(endpoint, m_JobExpireTimeUtc, socketHandle, false);
             }
 
             // Receive remaining responses.
@@ -170,13 +171,12 @@ namespace Unity.Networking.QoS
                 Debug.LogError(error);
                 return;
             }
-            RecvQosResponsesTimed(addr, deadline, true);
+            RecvQosResponsesTimed(endpoint, deadline, socketHandle, true);
 
-            QosResult r;
             foreach (var s in m_QosServers)
             {
                 // If duplicate server, just copy the result.
-                r = s.Duplicate ? QosResults[s.FirstIdx] : QosResults[s.Idx];
+                var r = s.Duplicate ? QosResults[s.FirstIdx] : QosResults[s.Idx];
                 StoreResult(s.Idx, r);
             }
         }
@@ -185,14 +185,16 @@ namespace Unity.Networking.QoS
         /// Sends QoS requests to a server and receives any responses that are ready.
         /// </summary>
         /// <param name="server">Server that QoS requests should be sent to</param>
-        private void ProcessServer(InternalQosServer server)
+        /// <param name="socketHandle">The socket handle to use to send/receive packets</param>
+        private void ProcessServer(InternalQosServer server, Binding.Baselib_Socket_Handle socketHandle)
         {
             if (QosHelper.ExpiredUtc(m_JobExpireTimeUtc))
             {
                 Debug.LogWarning($"QosJob: not enough time to process {server.Address}.");
                 return;
             }
-            else if (DateTime.UtcNow < server.BackoffUntilUtc)
+            
+            if (DateTime.UtcNow < server.BackoffUntilUtc)
             {
                 Debug.LogWarning($"QosJob: skipping {server.Address} due to backoff restrictions");
                 return;
@@ -204,7 +206,7 @@ namespace Unity.Networking.QoS
 #endif
 
             QosResult r = QosResults[server.Idx];
-            int errorcode = SendQosRequests(server, ref r);
+            var errorcode = SendQosRequests(server, socketHandle, ref r);
             if (errorcode != 0)
             {
                 Debug.LogError($"QosJob: failed to send to {server.Address} (errorcode {errorcode})");
@@ -220,11 +222,12 @@ namespace Unity.Networking.QoS
         /// Sends QoS requests to the given server.
         /// </summary>
         /// <param name="server">Server that QoS requests should be sent to</param>
+        /// <param name="socketHandle">The baselib socket handle to use for sending the requests</param>
         /// <param name="result">Results from the send side of the check (packets sent)</param>
         /// <returns>
-        /// errorcode - the last error code generated (if any).  0 indicates no error.
+        /// errorcode - the last error code generated (if any).  0 indicates success.
         /// </returns>
-        private int SendQosRequests(InternalQosServer server, ref QosResult result)
+        private Binding.Baselib_ErrorCode SendQosRequests(InternalQosServer server, Binding.Baselib_Socket_Handle socketHandle, ref QosResult result)
         {
             QosRequest request = new QosRequest
             {
@@ -235,26 +238,24 @@ namespace Unity.Networking.QoS
             StoreServer(server);
 
             // Send all requests.
-            NetworkInterfaceEndPoint remote = server.RemoteEndpoint;
             result.RequestsSent = 0;
             do
             {
                 if (QosHelper.ExpiredUtc(m_JobExpireTimeUtc))
                 {
-                    Debug.LogWarning($"QosJob: not enough time to complete {RequestsPerEndpoint - result.RequestsSent} sends to {QosHelper.Address(remote)} ");
-                    return 0;
+                    Debug.LogWarning($"QosJob: not enough time to complete {RequestsPerEndpoint - result.RequestsSent} sends to {server.Address} ");
+                    return Binding.Baselib_ErrorCode.Timeout;
                 }
-
                 request.Timestamp = (ulong)(DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond);
                 request.Sequence = (byte)result.RequestsSent;
 
-                int errorcode = 0;
-                int sent = 0;
-                (sent, errorcode) = request.Send(m_Socket, ref remote, m_JobExpireTimeUtc);
-                if (errorcode != 0)
+                int errorCode = 0;
+                uint sent = 0;
+                (sent, errorCode) = request.Send(socketHandle.handle, server.RemoteEndpoint, m_JobExpireTimeUtc);
+                if ((Binding.Baselib_ErrorCode)errorCode != Binding.Baselib_ErrorCode.Success)
                 {
-                    Debug.LogError($"QosJob: send returned error code {errorcode}, can't continue");
-                    return errorcode;
+                    Debug.LogError($"QosJob: send returned error code {(Binding.Baselib_ErrorCode)errorCode}, can't continue");
+                    return (Binding.Baselib_ErrorCode)errorCode;
                 }
                 else if (sent != request.Length)
                 {
@@ -302,16 +303,13 @@ namespace Unity.Networking.QoS
         /// <param name="addr">The interface address for storage</param>
         /// <param name="deadline">Responses after this point in time may not be processed</param>
         /// <param name="wait">If true waits for all pending responses to be received, otherwise returns early if no response is received</param>
-        /// <returns>
-        /// errorcode - the last error code (if any). 0 means no error.
-        /// </returns>
-        private int RecvQosResponsesTimed(NetworkInterfaceEndPoint addr, DateTime deadline, bool wait)
+        private void RecvQosResponsesTimed(NetworkEndPoint addr, DateTime deadline, Binding.Baselib_Socket_Handle socketHandle, bool wait)
         {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             int hadResponses = m_Responses;
             DateTime startTime = DateTime.UtcNow;
 #endif
-            int rc = RecvQosResponses(addr, deadline, wait);
+            RecvQosResponses(addr, deadline, socketHandle, wait);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             var t = (DateTime.UtcNow - startTime).TotalMilliseconds;
             var p = m_Responses - hadResponses;
@@ -321,7 +319,6 @@ namespace Unity.Networking.QoS
             string w = wait? "waiting" : "";
             Debug.Log($"QosJob: received {p} responses of {m_Responses}/{m_Requests} in {QosHelper.Since(startTime)} {w}{avgTime}");
 #endif
-            return rc;
         }
 
         /// <summary>
@@ -329,18 +326,16 @@ namespace Unity.Networking.QoS
         /// </summary>
         /// <param name="addr">The interface address for storage</param>
         /// <param name="deadline">Responses after this point in time may not be processed</param>
+        /// <param name="socketHandle">A Baselib socket handle to use for receiving responses</param>
         /// <param name="wait">If true waits for all pending responses to be received, otherwise returns as soon as no more responses are received</param>
-        /// <returns>
-        /// errorcode - the last error code (if any). 0 means no error.
-        /// </returns>
-        private unsafe int RecvQosResponses(NetworkInterfaceEndPoint addr, DateTime deadline, bool wait)
+        private void RecvQosResponses(NetworkEndPoint addr, DateTime deadline, Binding.Baselib_Socket_Handle socketHandle, bool wait)
         {
             if (m_Requests == m_Responses)
-                return 0;
+                return;
 
             QosResponse response = new QosResponse();
             QosResult result = QosResults[0];
-            int errorcode = 0;
+            int errorCode = 0;
             int received = 0;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             int tries = 0;
@@ -353,20 +348,20 @@ namespace Unity.Networking.QoS
                     // Even though this could indicate a config issue the most common cause
                     // will be packet loss so use debug not warning.
                     Debug.Log($"QosJob: not enough time to receive {m_Requests - m_Responses} responses still outstanding");
-                    return 0;
+                    return;
                 }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
                 DateTime startTime = DateTime.UtcNow;
 #endif
-                (received, errorcode) = response.Recv(m_Socket, wait, deadline, ref addr);
+                (received, errorCode) = response.Recv(socketHandle.handle, wait, deadline, ref addr);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
                 tries++;
 #endif
                 if (received == 0)
                 {
                     if (!wait)
-                        return 0; // Wait disabled so just return.
+                        return; // Wait disabled so just return.
 
                     continue; // Timeout so just retry.
                 }
@@ -389,7 +384,7 @@ namespace Unity.Networking.QoS
                 string error = "";
                 if (!response.Verify(result.RequestsSent, ref error))
                 {
-                    Debug.LogWarning($"QosJob: ignoring response from {QosHelper.Address(addr)} verify failed with {error}");
+                    Debug.LogWarning($"QosJob: ignoring response from {m_QosServers[idx].Address} verify failed with {error}");
                     result.InvalidResponses++;
                 }
                 else
@@ -398,7 +393,7 @@ namespace Unity.Networking.QoS
                     result.ResponsesReceived++;
                     result.AddAggregateLatency((uint)response.LatencyMs);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-                    Debug.Log($"QosJob: response from {QosHelper.Address(addr)} with latency {response.LatencyMs}ms");
+                    Debug.Log($"QosJob: response from {m_QosServers[idx].Address} with latency {response.LatencyMs}ms");
 #endif
 
                     // Determine if we've had flow control applied to us. If so, save the most significant result based
@@ -413,8 +408,6 @@ namespace Unity.Networking.QoS
 
                 StoreResult(idx, result);
             }
-
-            return 0;
         }
 
         /// <summary>
@@ -426,17 +419,7 @@ namespace Unity.Networking.QoS
         /// </returns>
         private string EnableReceiveWait()
         {
-            int rc;
-            int errorcode = 0;
-
-            if ((rc = NativeBindings.network_set_receive_timeout(m_Socket, ReceiveWaitMs, ref errorcode)) != 0)
-            {
-                return $"QosJob: failed to set receive timeout (errorcode {errorcode})";
-            }
-            else if ((rc = NativeBindings.network_set_blocking(m_Socket, ref errorcode)) != 0)
-            {
-                return $"QosJob: failed to set blocking (errorcode {errorcode})";
-            }
+            // TODO: implement blocking on baselib
             return "";
         }
 
@@ -446,19 +429,17 @@ namespace Unity.Networking.QoS
         /// <returns>
         /// index - the index of server if found, otherwise -1.
         /// </returns>
-        private int LookupResult(NetworkInterfaceEndPoint endPoint, QosResponse response, ref QosResult result)
+        private int LookupResult(NetworkEndPoint endPoint, QosResponse response, ref QosResult result)
         {
-            int idx = 0;
-
             // TODO(steve): Connecting to loopback at nonstandard (but technically correct) addresses like
             // 127.0.0.2 can return a remote address of 127.0.0.1, resulting in a mismatch which we could fix.
-            if (m_AddressIndexes.TryGetValue(QosHelper.NetworkAddress(endPoint), out idx))
+            if (m_AddressIndexes.TryGetValue(endPoint.Address, out var idx))
             {
                 result = QosResults[idx];
                 var s = m_QosServers[idx];
                 if (response.Identifier != s.RequestIdentifier)
                 {
-                    Debug.LogWarning($"QosJob: invalid identifier from {QosHelper.Address(endPoint)} 0x{response.Identifier:X4} != 0x{s.RequestIdentifier:X4} ignoring");
+                    Debug.LogWarning($"QosJob: invalid identifier from {s.Address} 0x{response.Identifier:X4} != 0x{s.RequestIdentifier:X4} ignoring");
                     result.InvalidResponses++;
                     return -1;
                 }
@@ -466,7 +447,7 @@ namespace Unity.Networking.QoS
                 return idx;
             }
 
-            Debug.LogWarning($"QosJob: ignoring unexpected response from {QosHelper.Address(endPoint)}");
+            Debug.LogWarning($"QosJob: ignoring unexpected response from {endPoint.Address}");
 
             return -1;
         }
@@ -479,84 +460,20 @@ namespace Unity.Networking.QoS
         /// (socketfd, errorcode) where socketfd is a native socket descriptor and errorcode is the error code (if any)
         /// errorcode is 0 on no error.
         /// </returns>
-        private unsafe static (long, int) CreateAndBindSocket()
+        private static unsafe (Binding.Baselib_Socket_Handle, Binding.Baselib_ErrorCode) CreateAndBindSocket()
         {
-            // Create the local socket.
-            NetworkInterfaceEndPoint addr = QosHelper.CreateInterfaceEndPoint(NetworkEndPoint.AnyIpv4); // TODO(steve): IPv6 support
-            int errorcode = 0;
-            long socket = -1;
-            int rc = NativeBindings.network_create_and_bind(ref socket, ref *(network_address*)addr.data, ref errorcode);
-            if (rc != 0)
-            {
-                Debug.LogError($"QosJob: failed to create and bind (errorcode {errorcode} rc {rc})");
-                return (rc, errorcode);
-            }
+            var errorState = default(Binding.Baselib_ErrorState);
 
-            if ((rc = NativeBindings.network_set_nonblocking(socket, ref errorcode)) != 0)
+            // Create the socket handle.
+            var socketHandle = Binding.Baselib_Socket_Create(Binding.Baselib_NetworkAddress_Family.IPv4,
+                Binding.Baselib_Socket_Protocol.UDP, &errorState);
+    
+            if (errorState.code != Binding.Baselib_ErrorCode.Success)
             {
-                Debug.LogError($"QosJob: failed to set non blocking (errorcode {errorcode})");
-                int ec = 0;
-                if (NativeBindings.network_close(ref socket, ref ec) != 0)
-                {
-                    Debug.LogError($"QosJob: failed to close socket (errorcode {ec})");
-                }
-                return (rc, errorcode);
+                Debug.LogError($"QosJob: Unable to create socket {errorState.code}");
             }
-
-            if ((rc = NativeBindings.network_set_send_buffer_size(socket, ushort.MaxValue, ref errorcode)) != 0)
-            {
-                Debug.LogError($"QosJob: failed to set send buffer (errorcode {errorcode})");
-            }
-            else
-            {
-                int len = 0;
-                if ((rc = NativeBindings.network_get_send_buffer_size(socket, ref len, ref errorcode)) != 0)
-                {
-                    Debug.LogError($"QosJob: failed to get send buffer (errorcode {errorcode})");
-                }
-                else if (len < ushort.MaxValue)
-                {
-                    Debug.LogWarning($"QosJob: send buffer {len} is less than requested {ushort.MaxValue}");
-                }
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-                else
-                {
-                    Debug.Log($"QosJob: send buffer is {len} requested {ushort.MaxValue}");
-                }
-#endif
-            }
-
-            if ((rc = NativeBindings.network_set_receive_buffer_size(socket, ushort.MaxValue, ref errorcode)) != 0)
-            {
-                Debug.LogError($"QosJob: failed to set receive buffer (errorcode {errorcode})");
-            }
-            else
-            {
-                int len = 0;
-                if ((rc = NativeBindings.network_get_receive_buffer_size(socket, ref len, ref errorcode)) != 0)
-                {
-                    Debug.LogError($"QosJob: failed to get receive buffer (errorcode {errorcode})");
-                }
-                else if (len < ushort.MaxValue)
-                {
-                    Debug.LogWarning($"QosJob: receive buffer {len} is less than requested {ushort.MaxValue}");
-                }
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-                else
-                {
-                    Debug.Log($"QosJob: receive buffer is {len} requested {ushort.MaxValue}");
-                }
-#endif
-            }
-
-#if UNITY_EDITOR_WIN || UNITY_STANDALONE_WIN
-            // Avoid WSAECONNRESET errors when sending to an endpoint which isn't open yet (unclean connect/disconnects)
-            NativeBindings.network_set_connection_reset(socket, 0);
-#endif
-            // Don't report non fatal buffer size changes as an error.
-            errorcode = 0;
-
-            return (socket, errorcode);
+             
+            return (socketHandle, errorState.code);
         }
     }
 }

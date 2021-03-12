@@ -1,5 +1,8 @@
 using System;
-using Unity.Networking.Transport;
+using System.Runtime.InteropServices;
+using Unity.Baselib.LowLevel;
+using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 
 namespace Unity.Networking.QoS
@@ -43,93 +46,79 @@ namespace Unity.Networking.QoS
         /// <summary>
         /// Receive a QosResponse if one is available
         /// </summary>
-        /// <param name="socket">Native socket descriptor</param>
-        /// <param name="endpoint">Remote endpoint from which to receive the response</param>
+        /// <param name="socketHandle">Native socket descriptor</param>
         /// <param name="expireTimeUtc">When to stop waiting for a response</param>
+        /// <param name="endPoint">Remote endpoint from which to receive the response</param>
         /// <returns>
         /// (received, errorcode) where received is the number of bytes received and errorcode is the error code if any.
         /// 0 means no error.
         /// </returns>
-        public (int received, int errorcode) Recv(long socket, bool wait, DateTime expireTimeUtc, ref NetworkInterfaceEndPoint endPoint)
+        internal unsafe (int received, int errorCode) Recv(IntPtr socketHandle, bool wait, DateTime expireTimeUtc, ref NetworkEndPoint endPoint)
         {
-            m_PacketLength = 0;
-            int errorcode = 0;
-            int received = -1;
+            Binding.Baselib_Socket_Message message = new Binding.Baselib_Socket_Message();
+            var buffer = new UnsafeAppendBuffer(50, 16, Allocator.Persistent);
             var startTime = DateTime.UtcNow;
-            unsafe
+            fixed (Binding.Baselib_NetworkAddress* pEndpointAddress = &endPoint.rawNetworkAddress)
             {
-                fixed (
-                    void* pMagic = &m_Magic,
-                    pVerAndFlow = &m_VerAndFlow,
-                    pSequence = &m_Sequence,
-                    pIdentifier = &m_Identifier,
-                    pTimestamp = &m_Timestamp,
-                    pSrcAddr = endPoint.data
-                )
+                message.dataLen = (uint)buffer.Capacity;
+                message.address = pEndpointAddress;
+                message.data = new IntPtr(buffer.Ptr);
+
+                var errorState = default(Binding.Baselib_ErrorState);
+                var socket = new Binding.Baselib_Socket_Handle {handle = socketHandle};
+
+                uint received = 0;
+                var tries = 0;
+                
+                while (!QosHelper.ExpiredUtc(expireTimeUtc))
                 {
-                    var iov = stackalloc network_iovec[5];
-                    iov[0].buf = pMagic;
-                    iov[0].len = sizeof(byte);
+                    errorState = default(Binding.Baselib_ErrorState);
+                    tries++;
 
-                    iov[1].buf = pVerAndFlow;
-                    iov[1].len = sizeof(byte);
-
-                    iov[2].buf = pSequence;
-                    iov[2].len = sizeof(byte);
-
-                    iov[3].buf = pIdentifier;
-                    iov[3].len = sizeof(ushort);
-
-                    // Everything below here is user-specified data and not part of the QosResponse header
-                    iov[4].buf = pTimestamp;
-                    iov[4].len = sizeof(ulong);
-
-                    int tries = 0;
-                    while (!QosHelper.ExpiredUtc(expireTimeUtc))
+                    received = Binding.Baselib_Socket_UDP_Recv(socket, &message, 1, &errorState);
+                    if (received == 0)
                     {
-                        errorcode = 0;
-                        tries++;
-
-                        received = NativeBindings.network_recvmsg(socket, iov, 5, ref *(network_address*)pSrcAddr, ref errorcode);
-                        if (received == -1)
+                        if (QosHelper.WouldBlock(errorState.nativeErrorCode))
                         {
-                            if (QosHelper.WouldBlock(errorcode))
+                            if (!wait)
                             {
-                                if (!wait)
-                                {
-                                    return (0, 0);
-                                }
-
-                                continue;
+                                return (0, 0);
                             }
+
+                            continue;
                         }
-                        break; // Got a response, or a non-retryable error
                     }
-
-                    if (received == -1)
-                    {
-                        if (!QosHelper.WouldBlock(errorcode))
-                        {
-                            Debug.LogError($"QosResponse: recv failed after {tries} tries in {QosHelper.Since(startTime)} (errorcode {errorcode})");
-                        }
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-                        else
-                        {
-                            // Don't treat as an error as it's expected behaviour if we're seeing any
-                            // level of packet loss.
-                            Debug.Log($"QosResponse: no response after {tries} tries in {QosHelper.Since(startTime)} (errorcode {errorcode})");
-                        }
-#endif
-
-                        return (received, errorcode);
-                    }
-
-                    m_PacketLength = (ushort)received;
+                    break; // Got a response, or a non-retryable error
                 }
-            }
 
-            m_LatencyMs = (Length >= MinPacketLen) ? (int)((ulong)(DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond) - m_Timestamp) : -1;
-            return (received, errorcode);
+                if (received == 0)
+                {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    // Don't treat as an error as it's expected behaviour if we're seeing any
+                    // level of packet loss.
+                    Debug.Log($"QosResponse: no response after {tries} tries in {QosHelper.Since(startTime)} (errorcode {errorState.code})");
+#endif
+                    buffer.Dispose();
+                    return (0, (int)errorState.code);
+                }
+
+                endPoint.rawNetworkAddress = *message.address;
+                m_PacketLength = (ushort)message.dataLen;
+                
+                m_Magic = Marshal.ReadByte(message.data);
+                m_VerAndFlow = Marshal.ReadByte(message.data, 1);
+                m_Sequence = Marshal.ReadByte(message.data, 2);
+                m_Identifier = (ushort)Marshal.ReadInt16(message.data, 3);
+                m_Timestamp = (ulong)Marshal.ReadInt64(message.data, 5);
+
+                m_LatencyMs = (Length >= MinPacketLen)
+                 ? (int) ((ulong) (DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond) - m_Timestamp)
+                 : -1;
+                
+            }
+            
+            buffer.Dispose();
+            return (Length, (int)Binding.Baselib_ErrorCode.Success);
         }
 
         /// <summary>

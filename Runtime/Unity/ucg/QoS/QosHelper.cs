@@ -1,11 +1,11 @@
 using System;
-using Unity.Networking.Transport;
+using UnityEngine;
 
 namespace Unity.Networking.QoS
 {
     public static class QosHelper
     {
-        public static bool WouldBlock(int errorcode)
+        public static bool WouldBlock(ulong errorcode)
         {
             // WSAEWOULDBLOCK == 10035 (windows)
             // WSAETIMEDOUT == 10060 (windows)
@@ -14,11 +14,10 @@ namespace Unity.Networking.QoS
             //
             // (*)Could also be 54 on SUSv3, and 246 on AIX 4.3,5.1, but we don't support those platforms
             return errorcode == 10035 ||
-                    errorcode == 10060 ||
-                    errorcode == 11 ||
-                    errorcode == 35;
+                   errorcode == 10060 ||
+                   errorcode == 11 ||
+                   errorcode == 35;
         }
-
         public static bool ExpiredUtc(DateTime timeUtc)
         {
             return DateTime.UtcNow > timeUtc;
@@ -27,21 +26,6 @@ namespace Unity.Networking.QoS
         public static string Since(DateTime dt)
         {
             return $"{(DateTime.UtcNow - dt).TotalMilliseconds:F0}ms";
-        }
-
-        public unsafe static network_address NetworkAddress(NetworkInterfaceEndPoint endpoint)
-        {
-            return *(network_address*)endpoint.data;
-        }
-
-        public static NetworkInterfaceEndPoint CreateInterfaceEndPoint(NetworkEndPoint addr)
-        {
-            return new UDPNetworkInterface().CreateInterfaceEndPoint(addr);
-        }
-
-        public static string Address(NetworkInterfaceEndPoint addr)
-        {
-            return new UDPNetworkInterface().GetGenericEndPoint(addr).Address;
         }
     }
 }
