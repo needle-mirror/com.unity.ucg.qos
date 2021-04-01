@@ -23,7 +23,7 @@ namespace Unity.Networking.QoS
 
         [DeallocateOnJobCompletion] private NativeArray<InternalQosServer> m_QosServers;
         [DeallocateOnJobCompletion] private NativeArray<byte> m_TitleBytesUtf8;
-        private NativeHashMap<NativeString64, int> m_AddressIndexes;
+        private NativeHashMap<FixedString64, int> m_AddressIndexes;
         private DateTime m_JobExpireTimeUtc;
         private int m_Requests;
         private int m_Responses;
@@ -40,7 +40,7 @@ namespace Unity.Networking.QoS
             ReceiveWaitMs = receiveWaitMs;
             
             // Copy the QoS Servers into the job, converting all the IP/Port to NetworkEndPoint and DateTime to ticks.
-            m_AddressIndexes = new NativeHashMap<NativeString64, int>(qosServers?.Count ?? 0, Allocator.Persistent);
+            m_AddressIndexes = new NativeHashMap<FixedString64, int>(qosServers?.Count ?? 0, Allocator.Persistent);
             m_QosServers = new NativeArray<InternalQosServer>(qosServers?.Count ?? 0, Allocator.Persistent);
             if (qosServers != null)
             {

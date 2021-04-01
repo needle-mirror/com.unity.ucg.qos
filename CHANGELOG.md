@@ -1,4 +1,8 @@
 # Changelog
+## [0.3.1-preview.2] - 2021-04-01
+### Fixed
+- Fixed the NativeString64 error with the latest Collections package. QoS now supports Collections versions 0.9.0-preview.6 and above.
+
 ## [0.3.1-preview.1] - 2021-03-12
 ### Changed
 - The QoS package no longer has a dependency on the Transport Package.
